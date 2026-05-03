@@ -11,3 +11,5 @@ venv/
 .vscode/
 .claude/
 *.log
+tests/2026 BGU Dept of Arts Book List for Library_batch 2.xlsx
+tests/2026 BGU Dept of Arts Book List for Library_batch 2_catalog_check.xlsx

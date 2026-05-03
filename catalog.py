@@ -1,3 +1,4 @@
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -41,6 +42,22 @@ _HEADERS = {
 
 REQUEST_DELAY_SEC = 0.4
 MAX_ATTEMPTS = 3
+
+TITLE_MIN = 75
+AUTHOR_MIN = 50
+COMPOSITE_MIN = 60
+
+_EDITOR_TOKENS = re.compile(
+    r"\(?\b(?:edited\s+by|editors?|eds?\.?)\b\)?",
+    re.IGNORECASE,
+)
+
+
+def _clean_author(s: str) -> str:
+    if not s:
+        return s
+    s = _EDITOR_TOKENS.sub(" ", s)
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def make_session() -> requests.Session:
@@ -111,10 +128,12 @@ def score(row: Row, doc: dict[str, Any]) -> Score:
 
     title_s = fuzz.token_set_ratio(row.title, doc_title) if doc_title else 0
 
-    author_candidates = [c for c in (doc_creator, doc_au, doc_aulast) if c]
-    if row.author and author_candidates:
-        author_s = max(fuzz.token_set_ratio(row.author, c) for c in author_candidates)
-    elif not row.author:
+    row_author = _clean_author(row.author)
+    author_candidates = [_clean_author(c) for c in (doc_creator, doc_au, doc_aulast) if c]
+    author_candidates = [c for c in author_candidates if c]
+    if row_author and author_candidates:
+        author_s = max(fuzz.token_set_ratio(row_author, c) for c in author_candidates)
+    elif not row_author:
         author_s = 70
     else:
         author_s = 0
@@ -143,7 +162,9 @@ def pick_best(row: Row, docs: list[dict[str, Any]]) -> dict[str, Any] | None:
     candidates: list[tuple[bool, float, dict[str, Any]]] = []
     for d in docs:
         s = score(row, d)
-        if s.title < 70 or s.composite < 60:
+        if s.title < TITLE_MIN or s.composite < COMPOSITE_MIN:
+            continue
+        if row.author and s.author < AUTHOR_MIN:
             continue
         candidates.append((_is_local(d), s.composite, d))
     if not candidates:
