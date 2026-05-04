@@ -52,12 +52,18 @@ _EDITOR_TOKENS = re.compile(
     re.IGNORECASE,
 )
 
+_CAMEL_BOUNDARY = re.compile(r"([a-z])([A-Z])")
+
 
 def _clean_author(s: str) -> str:
     if not s:
         return s
     s = _EDITOR_TOKENS.sub(" ", s)
     return re.sub(r"\s+", " ", s).strip()
+
+
+def _normalize_query(s: str) -> str:
+    return _CAMEL_BOUNDARY.sub(r"\1 \2", s)
 
 
 def make_session() -> requests.Session:
@@ -68,7 +74,7 @@ def make_session() -> requests.Session:
 
 def search(title: str, session: requests.Session) -> list[dict[str, Any]]:
     params = dict(_BASE_PARAMS)
-    params["q"] = f"any,contains,{title}"
+    params["q"] = f"any,contains,{_normalize_query(title)}"
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
@@ -126,17 +132,38 @@ def score(row: Row, doc: dict[str, Any]) -> Score:
     doc_pub_disp = _first(doc, "pnx", "display", "publisher")
     doc_pub_add = _strip_marc(_first(doc, "pnx", "addata", "pub"))
 
-    title_s = fuzz.token_set_ratio(row.title, doc_title) if doc_title else 0
+    if doc_title:
+        ts = fuzz.token_set_ratio(row.title, doc_title)
+        # partial_ratio captures the "user gave only the main title; catalog
+        # has a long subtitle" case. Only override when substring match is
+        # very strong (>=90), to avoid loosening the title gate everywhere.
+        pr = fuzz.partial_ratio(row.title.lower(), doc_title.lower())
+        title_s = max(ts, pr) if pr >= 90 else ts
+    else:
+        title_s = 0
 
     row_author = _clean_author(row.author)
-    author_candidates = [_clean_author(c) for c in (doc_creator, doc_au, doc_aulast) if c]
-    author_candidates = [c for c in author_candidates if c]
-    if row_author and author_candidates:
-        author_s = max(fuzz.token_set_ratio(row_author, c) for c in author_candidates)
+    # Only use primary author fields (creator, au); aulast alone is often
+    # catalog-noise from a chapter contributor on edited volumes.
+    primary_authors = [_clean_author(c) for c in (doc_creator, doc_au) if c]
+    primary_authors = [c for c in primary_authors if c]
+    aulast_clean = _clean_author(doc_aulast)
+    if row_author and primary_authors:
+        author_s = max(fuzz.token_set_ratio(row_author, c) for c in primary_authors)
     elif not row_author:
         author_s = 70
+    elif aulast_clean:
+        # Catalog has aulast but no full author/creator. Use it as a soft
+        # check: if the user-supplied surname appears, score moderately;
+        # otherwise treat as no-author (sentinel handled in pick_best).
+        if fuzz.partial_ratio(row_author, aulast_clean) >= 80:
+            author_s = 70
+        else:
+            author_s = -1
     else:
-        author_s = 0
+        # Catalog record has no creator info (e.g. edited volume).
+        # Sentinel is handled in pick_best with a stricter title gate.
+        author_s = -1
 
     pub_candidates = [c for c in (doc_pub_disp, doc_pub_add) if c]
     if row.publisher and pub_candidates:
@@ -146,7 +173,10 @@ def score(row: Row, doc: dict[str, Any]) -> Score:
     else:
         pub_s = 0
 
-    composite = 0.6 * title_s + 0.3 * author_s + 0.1 * pub_s
+    if author_s == -1:
+        composite = (0.6 * title_s + 0.1 * pub_s) / 0.7
+    else:
+        composite = 0.6 * title_s + 0.3 * author_s + 0.1 * pub_s
     return Score(title=int(title_s), author=int(author_s), publisher=int(pub_s), composite=composite)
 
 
@@ -158,15 +188,32 @@ def _is_local(doc: dict[str, Any]) -> bool:
     return any(c in _LOCAL_CATEGORIES for c in cats)
 
 
+NO_AUTHOR_TITLE_MIN = 85
+STRONG_AUTHOR_MIN = 95
+STRONG_AUTHOR_TITLE_MIN = 70
+
+
 def pick_best(row: Row, docs: list[dict[str, Any]]) -> dict[str, Any] | None:
     candidates: list[tuple[bool, float, dict[str, Any]]] = []
     for d in docs:
         s = score(row, d)
-        if s.title < TITLE_MIN or s.composite < COMPOSITE_MIN:
-            continue
-        if row.author and s.author < AUTHOR_MIN:
-            continue
-        candidates.append((_is_local(d), s.composite, d))
+        local = _is_local(d)
+        if s.author == -1:
+            # Catalog record has no creator (e.g. edited volume).
+            # Restrict to local Alma records — remote indexes often have
+            # blank creator on review/article records that aren't the book.
+            if not local:
+                continue
+            if s.title < NO_AUTHOR_TITLE_MIN or s.composite < COMPOSITE_MIN:
+                continue
+        else:
+            # Near-perfect author match relaxes the title threshold to 70.
+            title_min = STRONG_AUTHOR_TITLE_MIN if s.author >= STRONG_AUTHOR_MIN else TITLE_MIN
+            if s.title < title_min or s.composite < COMPOSITE_MIN:
+                continue
+            if row.author and s.author < AUTHOR_MIN:
+                continue
+        candidates.append((local, s.composite, d))
     if not candidates:
         return None
     candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
