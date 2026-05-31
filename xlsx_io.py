@@ -12,6 +12,7 @@ class Row:
     author: str
     publisher: str
     source_row: int
+    isbn: str = ""
 
 
 @dataclass

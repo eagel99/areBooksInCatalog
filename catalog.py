@@ -241,6 +241,78 @@ def is_available(doc: dict[str, Any]) -> bool:
     return any(a in _AVAIL_POSITIVE for a in availability)
 
 
+def _values(d: dict, *path) -> list[str]:
+    cur: Any = d
+    for p in path:
+        if isinstance(cur, dict):
+            cur = cur.get(p)
+        else:
+            return []
+        if cur is None:
+            return []
+    if isinstance(cur, list):
+        return [str(x) for x in cur]
+    return [str(cur)]
+
+
+def _isbn_in_doc(isbn: str, doc: dict[str, Any]) -> bool:
+    target = re.sub(r"[^0-9Xx]", "", isbn).upper()
+    if not target:
+        return False
+    fields = _values(doc, "pnx", "addata", "isbn") + _values(doc, "pnx", "display", "identifier")
+    for raw in fields:
+        if target in re.sub(r"[^0-9Xx]", "", raw).upper():
+            return True
+    return False
+
+
+_PUB_WORDS = re.compile(
+    r"\b(press|university|univ|publications?|editions?|éditions?|books?|classics?"
+    r"|directions|routledge|penguin|verso|liveright|seagull|nyrb|harvard|yale|cornell"
+    r"|princeton|chicago|wisconsin|garland|duculot|pub|up)\b",
+    re.IGNORECASE,
+)
+_YEAR = re.compile(r"\b(?:19|20)\d{2}\b")
+_EDITOR_PARENS = re.compile(r"\(\s*(?:eds?\.?|editors?|edited by)\s*\)", re.IGNORECASE)
+
+
+def _search_query(title: str) -> str:
+    """Reduce a free-text citation to a high-recall title/author query.
+
+    Word citations append a publisher + year (e.g. "U of Notre Dame P, 2018")
+    that the catalog's keyword AND-search cannot match, returning zero hits.
+    Drop trailing publisher/year clauses and stray years; keep title + author.
+    """
+    text = _EDITOR_PARENS.sub(" ", title)
+    clauses = re.split(r"\.\s+", text.strip().rstrip("."))
+    while len(clauses) > 1:
+        last = clauses[-1].strip()
+        if _YEAR.search(last) or (len(last.split()) <= 6 and _PUB_WORDS.search(last)):
+            clauses.pop()
+        else:
+            break
+    q = _YEAR.sub(" ", " ".join(clauses))
+    q = re.sub(r"\s+", " ", q).strip(" .,;:")
+    return q or title
+
+
+def find_doc(row: Row, session: requests.Session) -> dict[str, Any] | None:
+    """Locate the best catalog record for a row.
+
+    When the row carries an ISBN (typical of Word input), do a precise ISBN
+    lookup and require the result to actually carry that ISBN; otherwise fall
+    back to the existing fuzzy title/author match on a trimmed query.
+    """
+    if row.isbn:
+        docs = search(row.isbn, session)
+        matches = [d for d in docs if _isbn_in_doc(row.isbn, d)]
+        if matches:
+            matches.sort(key=_is_local, reverse=True)
+            return matches[0]
+    docs = search(_search_query(row.title), session)
+    return pick_best(row, docs)
+
+
 def permalink(doc: dict[str, Any]) -> str:
     recordid = _first(doc, "pnx", "control", "recordid")
     if not recordid:

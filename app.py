@@ -5,8 +5,19 @@ import traceback
 from pathlib import Path
 from tkinter import Tk, StringVar, filedialog, messagebox, ttk, scrolledtext, END, DISABLED, NORMAL
 
-from catalog import is_available, make_session, permalink, pick_best, search
-from xlsx_io import Result, read_rows, write_results
+import word_io
+import xlsx_io
+from catalog import find_doc, is_available, make_session, permalink
+from xlsx_io import Result, write_results
+
+_WORD_SUFFIXES = {".doc", ".docx"}
+
+
+def read_input(path: str) -> list:
+    """Read book rows from xlsx or Word (.doc/.docx) based on the file suffix."""
+    if Path(path).suffix.lower() in _WORD_SUFFIXES:
+        return word_io.read_rows(path)
+    return xlsx_io.read_rows(path)
 
 
 class App:
@@ -23,7 +34,7 @@ class App:
         frm = ttk.Frame(root, padding=12)
         frm.pack(fill="both", expand=True)
 
-        ttk.Label(frm, text="קובץ הקלט (xlsx):").grid(row=0, column=0, sticky="w")
+        ttk.Label(frm, text="קובץ הקלט (xlsx / Word):").grid(row=0, column=0, sticky="w")
         ttk.Entry(frm, textvariable=self.input_path).grid(row=1, column=0, sticky="we", padx=(0, 8))
         self.browse_btn = ttk.Button(frm, text="עיון...", command=self.browse)
         self.browse_btn.grid(row=1, column=1)
@@ -57,7 +68,12 @@ class App:
     def browse(self) -> None:
         path = filedialog.askopenfilename(
             title="בחר קובץ קלט",
-            filetypes=[("Excel", "*.xlsx"), ("All files", "*.*")],
+            filetypes=[
+                ("Excel / Word", "*.xlsx *.docx *.doc"),
+                ("Excel", "*.xlsx"),
+                ("Word", "*.docx *.doc"),
+                ("All files", "*.*"),
+            ],
         )
         if path:
             self.input_path.set(path)
@@ -94,7 +110,7 @@ class App:
 
     def _run(self, in_path: str, out_path: str) -> None:
         try:
-            rows = read_rows(in_path)
+            rows = read_input(in_path)
         except Exception as e:
             self._post(lambda: messagebox.showerror("שגיאה בקריאת הקובץ", str(e)))
             self._post(self._finish_failed)
@@ -117,8 +133,7 @@ class App:
         for i, row in enumerate(rows, start=1):
             self._post(lambda i=i, n=n, t=row.title: self.status.set(f"מחפש ({i}/{n}): {t[:80]}"))
             try:
-                docs = search(row.title, session)
-                best = pick_best(row, docs)
+                best = find_doc(row, session)
                 if best is not None:
                     exists = is_available(best)
                     link = permalink(best)
